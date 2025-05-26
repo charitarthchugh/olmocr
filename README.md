@@ -35,6 +35,7 @@ Features:
  - (Based on a 7B parameter VLM, so it requires a GPU)
 
 ### News
+ - May 23, 2025 - v0.1.70 - Official docker support and images are now available! [See Docker usage](#using-docker)
  - May 19, 2025 - v0.1.68 - [olmOCR-Bench](https://github.com/allenai/olmocr/tree/main/olmocr/bench) launch, scoring 77.4. Launch includes 2 point performance boost in olmOCR pipeline due to bug fixes with prompts.
  - Mar 17, 2025 - v0.1.60 - Performance improvements due to better temperature selection in sampling.
  - Feb 25, 2025 - v0.1.58 -  Initial public launch and demo.
@@ -207,12 +208,12 @@ python -m olmocr.pipeline s3://my_s3_bucket/pdfworkspaces/exampleworkspace --pdf
 
 Pull the Docker image.
 ```bash
-docker pull alleninstituteforai/olmocr:0.1.68
+docker pull alleninstituteforai/olmocr:latest
 ```
 
 To run the container interactively:
 ```bash
-docker run -it --gpus all --name olmocr_container alleninstituteforai/olmocr:0.1.68 /bin/bash
+docker run -it --gpus all --name olmocr_container alleninstituteforai/olmocr:latest /bin/bash
 ```
 
 If you want to access your local files inside the container, use volume mounting:
@@ -220,7 +221,7 @@ If you want to access your local files inside the container, use volume mounting
 docker run -it --gpus all \
   -v /path/to/your/local/files:/local_files \
   --name olmocr_container \
-  alleninstituteforai/olmocr:0.1.68 /bin/bash
+  alleninstituteforai/olmocr:latest /bin/bash
 ```
 
 All dependencies are already installed. Once you’re inside the container, you can run olmOCR commands. For example:

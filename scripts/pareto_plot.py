@@ -2,7 +2,7 @@
 Plot for OCR performance vs cost Pareto frontier figure for NeurIPS paper.
 
 Invocation:
-    python ocr_pareto_frontier.py output/
+    python scripts/pareto_plot.py .
 """
 
 import argparse
@@ -65,12 +65,9 @@ data = {
         "Gemini Flash 2",
         "Gemini Flash 2 (Batch)",
         "Marker v1.6.2",
-        "Ours (A100)",
-        "Ours (H100,L40S)",
-        "Qwen 2 VL (A100)",
-        "Qwen 2 VL (H100,L40S)",
-        "Qwen 2.5 VL (A100)",
-        "Qwen 2.5 VL (H100,L40S)",
+        "Ours",
+        "Qwen 2 VL",
+        "Qwen 2.5 VL"
     ],
     COST_COLUMN_NAME: [
         12480,
@@ -80,12 +77,9 @@ data = {
         499,
         249,
         235,
-        270,
-        190,
-        270,  # Same cost as Ours
-        190,  # Same cost as Ours
-        270,  # Same cost as Ours
-        190,  # Same cost as Ours
+        178,
+        178,  # Same cost as Ours
+        178   # Same cost as Ours
     ],
     PERF_COLUMN_NAME: [
         69.9,  # GPT-4o (Anchored)
@@ -96,12 +90,9 @@ data = {
         63.8,  # Same performance for batch
         59.4,  # marker v1.6.2
         77.4,  # Ours (performance is the same across hardware)
-        77.4,  # Ours (performance is the same across hardware)
-        31.5,  # Qwen2VL
         31.5,  # Qwen2VL
         65.5,  # Qwen2.5VL
-        65.5,  # Qwen2.5VL
-    ],
+    ]
 }
 
 df = pd.DataFrame(data)
@@ -115,23 +106,32 @@ model_categories = {
     "Gemini Flash 2": "Commercial VLM",
     "Gemini Flash 2 (Batch)": "Commercial VLM",
     "Marker v1.6.2": "Open Source Tool",
-    "Ours (A100)": "Ours",
-    "Ours (H100,L40S)": "Ours",
-    "Qwen 2 VL (A100)": "Open VLM",
-    "Qwen 2 VL (H100,L40S)": "Open VLM",
-    "Qwen 2.5 VL (A100)": "Open VLM",
-    "Qwen 2.5 VL (H100,L40S)": "Open VLM",
+    "Ours": "Ours",
+    "Qwen 2 VL": "Open VLM",
+    "Qwen 2.5 VL": "Open VLM"
 }
 
 df[CATEGORY_COLUMN_NAME] = df[MODEL_COLUMN_NAME].map(model_categories)
 
 # Category colors
-category_colors = {"Commercial API Tool": DARK_BLUE, "Commercial VLM": DARK_GREEN, "Open Source Tool": LIGHT_GREEN, "Ours": DARK_PINK, "Open VLM": PURPLE}
+category_colors = {
+    "Commercial API Tool": DARK_GREEN,
+    "Commercial VLM": DARK_GREEN,
+    "Open Source Tool": PURPLE,
+    "Ours": DARK_PINK,
+    "Open VLM": PURPLE
+}
 
 df[COLOR_COLUMN_NAME] = df[CATEGORY_COLUMN_NAME].map(category_colors)
 
 # Define marker types
-category_markers = {"Commercial API Tool": "o", "Commercial VLM": "D", "Open Source Tool": "s", "Ours": "*", "Open VLM": "^"}
+category_markers = {
+    "Commercial API Tool": "o",
+    "Commercial VLM": "^",
+    "Open Source Tool": "o",
+    "Ours": "*",
+    "Open VLM": "^"
+}
 
 df[MARKER_COLUMN_NAME] = df[CATEGORY_COLUMN_NAME].map(category_markers)
 
@@ -140,11 +140,11 @@ category_marker_sizes = {"Commercial API Tool": 120, "Commercial VLM": 120, "Ope
 
 # Define text colors
 category_text_colors = {
-    "Commercial API Tool": DARK_TEAL,
+    "Commercial API Tool": DARK_GREEN,
     "Commercial VLM": DARK_GREEN,
-    "Open Source Tool": DARK_TEAL,
-    "Ours": "#a51c5c",  # darker pink
-    "Open VLM": "#6f1188",  # darker purple
+    "Open Source Tool": PURPLE,  # darker purple
+    "Ours": DARK_PINK,  # darker pink
+    "Open VLM": PURPLE  # darker purple
 }
 
 # Label offsets for better readability
@@ -153,15 +153,12 @@ model_label_offsets = {
     "GPT-4o (Batch)": [-50, 10],
     "Mistral OCR": [-20, 10],
     "MinerU": [-15, -20],
-    "Gemini Flash 2": [0, 10],
+    "Gemini Flash 2": [-10, 10],
     "Gemini Flash 2 (Batch)": [-50, -15],
-    "Marker v1.6.2": [-25, -20],
-    "Ours (A100)": [-20, 10],
-    "Ours (H100,L40S)": [-60, 25],
-    "Qwen 2 VL (A100)": [-20, 10],
-    "Qwen 2 VL (H100,L40S)": [-60, 25],
-    "Qwen 2.5 VL (A100)": [-20, 10],
-    "Qwen 2.5 VL (H100,L40S)": [-60, 25],
+    "Marker v1.6.2": [-35, -20],
+    "Ours": [-20, 10],
+    "Qwen 2 VL": [-35, 10],
+    "Qwen 2.5 VL": [-35, 10]
 }
 
 df[OFFSET_COLUMN_NAME] = df[MODEL_COLUMN_NAME].map(model_label_offsets)
@@ -235,7 +232,7 @@ plt.gca().spines["right"].set_visible(False)
 
 # Add the legend with custom ordering and increased font size
 handles, labels = plt.gca().get_legend_handles_labels()
-desired_order = ["Ours", "Open Source Tool", "Open VLM", "Commercial VLM", "Commercial API Tool"]
+desired_order = ["Ours", "Open Source Tool", "Open VLM", "Commercial API Tool", "Commercial VLM"]
 label_to_handle = dict(zip(labels, handles))
 ordered_handles = [label_to_handle[label] for label in desired_order if label in label_to_handle]
 ordered_labels = [label for label in desired_order if label in labels]
