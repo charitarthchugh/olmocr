@@ -11,6 +11,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -85,14 +86,72 @@ metrics = MetricsKeeper(window=60 * 5)
 tracker = WorkerTracker()
 
 # Process pool for offloading cpu bound work, like calculating anchor texts, max 32 workers, otherwise it can spawn way too many workers on a big machine
-process_pool = ProcessPoolExecutor(max_workers=min(multiprocessing.cpu_count() // 2 + 1, 32), mp_context=multiprocessing.get_context("spawn"))
+process_pool = ProcessPoolExecutor(max_workers=min(multiprocessing.cpu_count() // 2 + 1, 32),
+                                   mp_context=multiprocessing.get_context("spawn"))
 
 # Filter object, cached so it will only get loaded when/if you need it
-get_pdf_filter = cache(lambda: PdfFilter(languages_to_keep={Language.ENGLISH, None}, apply_download_spam_check=True, apply_form_check=True))
+get_pdf_filter = cache(lambda: PdfFilter(languages_to_keep={Language.ENGLISH, None}, apply_download_spam_check=True,
+                                         apply_form_check=True))
 
 # Specify a default port, but it can be overridden by args
 SGLANG_SERVER_PORT = 30024
 
+
+def get_available_gpus(memory_constraint_gb):
+    """
+    Dynamically chooses which GPUs to use on a multi-GPU machine
+    given a memory constraint in GB.
+
+    Args:
+        memory_constraint_gb (float): The maximum memory allowed to be used per GPU in GB.
+
+    Returns:
+        list: A list of integers representing the indices of available GPUs.
+    """
+    try:
+        # Run nvidia-smi command to get GPU information in CSV format without headers and units
+        cmd = ["nvidia-smi", "--query-gpu=index,memory.free,memory.total", "--format=csv,noheader,nounits"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+        output_lines = result.stdout.strip().splitlines()
+        if not output_lines:
+            print("nvidia-smi returned empty output.")
+            return []
+
+        available_gpus = []
+        for line in output_lines:
+            parts = line.split(', ')
+            if len(parts) != 3:
+                print(f"Unexpected CSV format: {line}")
+                continue
+
+            try:
+                gpu_index = int(parts[0])
+                free_memory_mib = int(parts[1])
+                total_memory_mib = int(parts[2])
+            except ValueError:
+                print(f"Error parsing GPU data: {line}")
+                continue
+
+            free_memory_gb = free_memory_mib / 1024
+            total_memory_gb = total_memory_mib / 1024
+
+            print(f"GPU {gpu_index}: Free Memory = {free_memory_gb:.2f} GB, Total Memory = {total_memory_gb:.2f} GB")
+
+            if free_memory_gb >= memory_constraint_gb:
+                available_gpus.append(gpu_index)
+        return available_gpus
+    except FileNotFoundError:
+        print("nvidia-smi not found. Please ensure NVIDIA drivers are installed and in your PATH.")
+        return []
+    except subprocess.CalledProcessError as e:
+        print(f"Error running nvidia-smi: {e}")
+        return []
+
+
+AVAILABLE_GPUS = get_available_gpus(memory_constraint_gb=23)
+
+for gpu_id in 
 
 @dataclass(frozen=True)
 class PageResult:
@@ -105,18 +164,21 @@ class PageResult:
     is_fallback: bool
 
 
-async def build_page_query(local_pdf_path: str, page: int, target_longest_image_dim: int, target_anchor_text_len: int, image_rotation: int = 0) -> dict:
+async def build_page_query(local_pdf_path: str, page: int, target_longest_image_dim: int, target_anchor_text_len: int,
+                           image_rotation: int = 0) -> dict:
     MAX_TOKENS = 3000
     assert image_rotation in [0, 90, 180, 270], "Invalid image rotation provided in build_page_query"
 
     # Allow the page rendering to process in the background while we get the anchor text (which blocks the main thread)
-    image_base64 = asyncio.to_thread(render_pdf_to_base64png, local_pdf_path, page, target_longest_image_dim=target_longest_image_dim)
+    image_base64 = asyncio.to_thread(render_pdf_to_base64png, local_pdf_path, page,
+                                     target_longest_image_dim=target_longest_image_dim)
 
     # GET ANCHOR TEXT IS NOT THREAD SAFE!! Ahhhh..... don't try to do it
     # and it's also CPU bound, so it needs to run in a process pool
     loop = asyncio.get_running_loop()
     anchor_text = loop.run_in_executor(
-        process_pool, partial(get_anchor_text, pdf_engine="pdfreport", target_length=target_anchor_text_len), local_pdf_path, page
+        process_pool, partial(get_anchor_text, pdf_engine="pdfreport", target_length=target_anchor_text_len),
+        local_pdf_path, page
     )
 
     image_base64, anchor_text = await asyncio.gather(image_base64, anchor_text)  # type: ignore
@@ -224,7 +286,8 @@ async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path:
     await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "started")
 
     while attempt < MAX_RETRIES:
-        query = await build_page_query(pdf_local_path, page_num, args.target_longest_image_dim, local_anchor_text_len, image_rotation=local_image_rotation)
+        query = await build_page_query(pdf_local_path, page_num, args.target_longest_image_dim, local_anchor_text_len,
+                                       image_rotation=local_image_rotation)
         query["temperature"] = TEMPERATURE_BY_ATTEMPT[
             min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
         ]  # Change temperature as number of attempts increases to overcome repetition issues at expense of quality
@@ -278,7 +341,7 @@ async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path:
             # Now we want to do exponential backoff, and not count this as an actual page retry
             # Page retrys are supposed to be for fixing bad results from the model, but actual requests to sglang
             # are supposed to work. Probably this means that the server is just restarting
-            sleep_delay = 10 * (2**exponential_backoffs)
+            sleep_delay = 10 * (2 ** exponential_backoffs)
             exponential_backoffs += 1
             logger.info(f"Sleeping for {sleep_delay} seconds on {pdf_orig_path}-{page_num} to allow server restart")
             await asyncio.sleep(sleep_delay)
@@ -372,6 +435,17 @@ async def process_pdf(args, worker_id: int, pdf_orig_path: str):
                 logger.warning(
                     f"Document {pdf_orig_path} processed with {num_fallback_pages} fallback pages out of {num_pages}, proceeding to build Dolma document."
                 )
+
+            # After successful processing and before returning
+            if os.path.exists(pdf_orig_path) and not pdf_orig_path.startswith("s3://"):
+                done_dir = os.path.join(os.path.dirname(pdf_orig_path), "done")
+                os.makedirs(done_dir, exist_ok=True)
+                dest_path = os.path.join(done_dir, os.path.basename(pdf_orig_path))
+                try:
+                    shutil.move(pdf_orig_path, dest_path)
+                    logger.info(f"Moved {pdf_orig_path} to {dest_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to move {pdf_orig_path} to {dest_path}: {e}")
 
             return build_dolma_document(pdf_orig_path, page_results)
         except Exception as e:
@@ -550,14 +624,17 @@ async def worker(args, work_queue: WorkQueue, semaphore, worker_id):
 
 
 async def sglang_server_task(model_name_or_path, args, semaphore):
+    # torch_cuda_arch_list_env = f"{torch.cuda.get_device_properties(0).major}.{torch.cuda.get_device_properties(0).minor}"
     # Check GPU memory, lower mem devices need a bit less KV cache space because the VLM takes additional memory
-    gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
+    gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
     mem_fraction_arg = ["--mem-fraction-static", "0.80"] if gpu_memory < 60 else []
-
+    gpu_env_str = ",".join(map(str, AVAILABLE_GPUS))
+    # os.environ["CUDA_VISIBLE_DEVICES"] = gpu_env_str
+    dp_arg = ["--dp-size", "2"] if len(AVAILABLE_GPUS) > 1 else []
     cmd = [
         "python3",
         "-m",
-        "sglang.launch_server",
+        "sglang_router.launch_server",
         "--model-path",
         model_name_or_path,
         "--chat-template",
@@ -567,13 +644,23 @@ async def sglang_server_task(model_name_or_path, args, semaphore):
         str(SGLANG_SERVER_PORT),
         "--log-level-http",
         "warning",
+        # "--tp",
+        # "2",
+        # "--enable-p2p-check"
+        # "--quantization", "fp8"
+        "--disable-cuda-graph",
     ]
     cmd.extend(mem_fraction_arg)
-
+    cmd.extend(dp_arg)
+    env = os.environ.copy()
+    #env["CUDA_VISIBLE_DEVICES"] = gpu_env_str
+    # env['TORCH_CUDA_ARCH_LIST'] = torch_cuda_arch_list_env
+    # print(cmd, env, "THE FRIKING COMMAND")
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env
     )
 
     # Ensure the subprocess is terminated on exit
@@ -669,7 +756,8 @@ async def sglang_server_host(model_name_or_path, args, semaphore):
     if retry >= MAX_RETRIES:
         logger.error(f"Ended up starting the sglang server more than {retry} times, cancelling pipeline")
         logger.error("")
-        logger.error("Please make sure sglang is installed according to the latest instructions here: https://docs.sglang.ai/start/install.html")
+        logger.error(
+            "Please make sure sglang is installed according to the latest instructions here: https://docs.sglang.ai/start/install.html")
         sys.exit(1)
 
 
@@ -697,7 +785,8 @@ async def sglang_server_ready():
 
 
 async def download_model(model_name_or_path: str):
-    if model_name_or_path.startswith("s3://") or model_name_or_path.startswith("gs://") or model_name_or_path.startswith("weka://"):
+    if model_name_or_path.startswith("s3://") or model_name_or_path.startswith(
+            "gs://") or model_name_or_path.startswith("weka://"):
         logger.info(f"Downloading model directory from '{model_name_or_path}'")
         model_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "olmocr", "model")
         download_directory([model_name_or_path], model_cache_dir)
@@ -746,7 +835,8 @@ def submit_beaker_job(args):
     args_list = [arg for arg in sys.argv[1:] if arg != "--beaker"]
 
     # Take out the --pdfs [arg] or --pdfs=[arg], since the queue is populated locally
-    args_list = [arg for i, arg in enumerate(args_list) if not (arg.startswith("--pdfs") or (i > 0 and args_list[i - 1] == "--pdfs"))]
+    args_list = [arg for i, arg in enumerate(args_list) if
+                 not (arg.startswith("--pdfs") or (i > 0 and args_list[i - 1] == "--pdfs"))]
 
     try:
         b.secret.get(f"{owner}-WEKA_ACCESS_KEY_ID", args.beaker_workspace)
@@ -762,7 +852,8 @@ def submit_beaker_job(args):
             sys.exit(1)
 
         b.secret.write(f"{owner}-WEKA_ACCESS_KEY_ID", os.environ.get("WEKA_ACCESS_KEY_ID", ""), args.beaker_workspace)
-        b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""), args.beaker_workspace)
+        b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""),
+                       args.beaker_workspace)
         b.secret.write(
             f"{owner}-AWS_CREDENTIALS_FILE",
             open(os.path.join(os.path.expanduser("~"), ".aws", "credentials")).read(),
@@ -814,9 +905,11 @@ def submit_beaker_job(args):
                 ),
                 image=ImageSource(beaker=beaker_image),
                 command=["python", "-m", "olmocr.pipeline"] + args_list,
-                env_vars=[EnvVar(name="BEAKER_JOB_NAME", value=task_name), EnvVar(name="OWNER", value=owner)] + env_var_secrets,
+                env_vars=[EnvVar(name="BEAKER_JOB_NAME", value=task_name),
+                          EnvVar(name="OWNER", value=owner)] + env_var_secrets,
                 resources=TaskResources(gpu_count=1),
-                constraints=Constraints(cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
+                constraints=Constraints(
+                    cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
                 result=ResultSpec(path="/noop-results"),
             )
         ],
@@ -921,7 +1014,8 @@ def print_stats(args, root_work_queue):
         futures = {executor.submit(process_output_file, item): item for item in done_work_items}
 
         for future in tqdm(as_completed(futures), total=len(futures)):
-            (doc_count, input_tokens, output_tokens, pages, fallback_pages, processed_paths, long_context_docs, long_context_tokens) = future.result()
+            (doc_count, input_tokens, output_tokens, pages, fallback_pages, processed_paths, long_context_docs,
+             long_context_tokens) = future.result()
             docs_total += doc_count
             input_tokens_total += input_tokens
             output_tokens_total += output_tokens
@@ -945,11 +1039,11 @@ def print_stats(args, root_work_queue):
     print(f"Total pages processed: {pages_total:,}")
 
     print(f"\nTotal output tokens: {output_tokens_total:,}")
-    print(f"Projected output tokens: {round((output_tokens_total/max(1, completed_items))*total_items):,}")
+    print(f"Projected output tokens: {round((output_tokens_total / max(1, completed_items)) * total_items):,}")
 
-    print(f"\nAverage pages per doc: {pages_total/max(1,docs_total):,.1f}")
-    print(f"Average output tokens per doc: {output_tokens_total/max(1,docs_total):,.1f}")
-    print(f"Average output tokens per page: {output_tokens_total/max(1,pages_total):,.1f}")
+    print(f"\nAverage pages per doc: {pages_total / max(1, docs_total):,.1f}")
+    print(f"Average output tokens per doc: {output_tokens_total / max(1, docs_total):,.1f}")
+    print(f"Average output tokens per page: {output_tokens_total / max(1, pages_total):,.1f}")
 
     # Print long context documents stats
     print(f"\nLong Context Documents (>{LONG_CONTEXT_THRESHOLD} tokens): {long_context_docs_count:,}")
@@ -957,7 +1051,8 @@ def print_stats(args, root_work_queue):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Manager for running millions of PDFs through a batch inference pipeline")
+    parser = argparse.ArgumentParser(
+        description="Manager for running millions of PDFs through a batch inference pipeline")
     parser.add_argument(
         "workspace",
         help="The filesystem path where work will be stored, can be a local folder, or an s3 path if coordinating work with many workers, s3://bucket/prefix/ ",
@@ -968,15 +1063,23 @@ async def main():
         help="Path to add pdfs stored in s3 to the workspace, can be a glob path s3://bucket/prefix/*.pdf or path to file containing list of pdf paths",
         default=None,
     )
-    parser.add_argument("--workspace_profile", help="S3 configuration profile for accessing the workspace", default=None)
-    parser.add_argument("--pdf_profile", help="S3 configuration profile for accessing the raw pdf documents", default=None)
-    parser.add_argument("--pages_per_group", type=int, default=500, help="Aiming for this many pdf pages per work item group")
-    parser.add_argument("--max_page_retries", type=int, default=8, help="Max number of times we will retry rendering a page")
-    parser.add_argument("--max_page_error_rate", type=float, default=0.004, help="Rate of allowable failed pages in a document, 1/250 by default")
+    parser.add_argument("--workspace_profile", help="S3 configuration profile for accessing the workspace",
+                        default=None)
+    parser.add_argument("--pdf_profile", help="S3 configuration profile for accessing the raw pdf documents",
+                        default=None)
+    parser.add_argument("--pages_per_group", type=int, default=500,
+                        help="Aiming for this many pdf pages per work item group")
+    parser.add_argument("--max_page_retries", type=int, default=8,
+                        help="Max number of times we will retry rendering a page")
+    parser.add_argument("--max_page_error_rate", type=float, default=0.004,
+                        help="Rate of allowable failed pages in a document, 1/250 by default")
     parser.add_argument("--workers", type=int, default=8, help="Number of workers to run at a time")
-    parser.add_argument("--apply_filter", action="store_true", help="Apply basic filtering to English pdfs which are not forms, and not likely seo spam")
-    parser.add_argument("--stats", action="store_true", help="Instead of running any job, reports some statistics about the current workspace")
-    parser.add_argument("--markdown", action="store_true", help="Also write natural text to markdown files preserving the folder structure of the input pdfs")
+    parser.add_argument("--apply_filter", action="store_true",
+                        help="Apply basic filtering to English pdfs which are not forms, and not likely seo spam")
+    parser.add_argument("--stats", action="store_true",
+                        help="Instead of running any job, reports some statistics about the current workspace")
+    parser.add_argument("--markdown", action="store_true",
+                        help="Also write natural text to markdown files preserving the folder structure of the input pdfs")
 
     # Model parameters
     parser.add_argument(
@@ -984,10 +1087,14 @@ async def main():
         help="List of paths where you can find the model to convert this pdf. You can specify several different paths here, and the script will try to use the one which is fastest to access",
         default="allenai/olmOCR-7B-0225-preview",
     )
-    parser.add_argument("--model_max_context", type=int, default="8192", help="Maximum context length that the model was fine tuned under")
-    parser.add_argument("--model_chat_template", type=str, default="qwen2-vl", help="Chat template to pass to sglang server")
-    parser.add_argument("--target_longest_image_dim", type=int, help="Dimension on longest side to use for rendering the pdf pages", default=1024)
-    parser.add_argument("--target_anchor_text_len", type=int, help="Maximum amount of anchor text to use (characters)", default=6000)
+    parser.add_argument("--model_max_context", type=int, default="8192",
+                        help="Maximum context length that the model was fine tuned under")
+    parser.add_argument("--model_chat_template", type=str, default="qwen2-vl",
+                        help="Chat template to pass to sglang server")
+    parser.add_argument("--target_longest_image_dim", type=int,
+                        help="Dimension on longest side to use for rendering the pdf pages", default=1024)
+    parser.add_argument("--target_anchor_text_len", type=int, help="Maximum amount of anchor text to use (characters)",
+                        default=6000)
 
     # Beaker/job running stuff
     parser.add_argument("--beaker", action="store_true", help="Submit this job to beaker instead of running locally")
@@ -995,7 +1102,8 @@ async def main():
     parser.add_argument(
         "--beaker_cluster",
         help="Beaker clusters you want to run on",
-        default=["ai2/jupiter-cirrascale-2", "ai2/ceres-cirrascale", "ai2/neptune-cirrascale", "ai2/saturn-cirrascale", "ai2/augusta-google-1"],
+        default=["ai2/jupiter-cirrascale-2", "ai2/ceres-cirrascale", "ai2/neptune-cirrascale", "ai2/saturn-cirrascale",
+                 "ai2/augusta-google-1"],
     )
     parser.add_argument("--beaker_gpus", type=int, default=1, help="Number of gpu replicas to run")
     parser.add_argument("--beaker_priority", type=str, default="normal", help="Beaker priority level for the job")
@@ -1057,10 +1165,10 @@ async def main():
                 pdf_work_paths |= set(expand_s3_glob(pdf_s3, pdf_path))
             elif os.path.exists(pdf_path):
                 if (
-                    pdf_path.lower().endswith(".pdf")
-                    or pdf_path.lower().endswith(".png")
-                    or pdf_path.lower().endswith(".jpg")
-                    or pdf_path.lower().endswith(".jpeg")
+                        pdf_path.lower().endswith(".pdf")
+                        or pdf_path.lower().endswith(".png")
+                        or pdf_path.lower().endswith(".jpg")
+                        or pdf_path.lower().endswith(".jpeg")
                 ):
                     if open(pdf_path, "rb").read(4) == b"%PDF":
                         logger.info(f"Loading file at {pdf_path} as PDF document")
@@ -1107,7 +1215,8 @@ async def main():
             avg_pages_per_pdf = 10  # Default to 10 pages per PDF if sampling fails
 
         items_per_group = max(1, int(args.pages_per_group / avg_pages_per_pdf))
-        logger.info(f"Calculated items_per_group: {items_per_group} based on average pages per PDF: {avg_pages_per_pdf:.2f}")
+        logger.info(
+            f"Calculated items_per_group: {items_per_group} based on average pages per PDF: {avg_pages_per_pdf:.2f}")
 
         # Now call populate_queue
         await work_queue.populate_queue(pdf_work_paths, items_per_group)
